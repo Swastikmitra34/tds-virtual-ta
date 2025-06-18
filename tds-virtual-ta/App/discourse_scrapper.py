@@ -1,54 +1,43 @@
-import requests
+import httpx
 from bs4 import BeautifulSoup
-import json
 import os
+from App.utils import html_to_markdown
+from dotenv import load_dotenv
+load_dotenv()
 
-DISCOURSE_BASE = "https://discourse.onlinedegree.iitm.ac.in"
-CATEGORIES = ["tools-in-data-science", "assignments", "projects"]
 
-headers = {
-    "Cookie": os.getenv("DISCOURSE_COOKIE")
-}
+LOGIN_URL = "https://discourse.onlinedegree.iitm.ac.in/session"
+BASE_URL = "https://discourse.onlinedegree.iitm.ac.in"
+USERNAME = os.getenv("DISCOURSE_USER")
+PASSWORD = os.getenv("DISCOURSE_PASS")
 
-def scrape_posts():
-    posts = []
-    for category in CATEGORIES:
-        url = f"{DISCOURSE_BASE}/c/{category}.json"
-        r = requests.get(url, headers=headers)
-        for topic in r.json().get("topic_list", {}).get("topics", []):
-            topic_id = topic["id"]
-            topic_url = f"{DISCOURSE_BASE}/t/{topic_id}.json"
-            topic_res = requests.get(topic_url, headers=headers)
-            posts.append(topic_res.json())
+client = httpx.Client(follow_redirects=True)
 
-    with open("data/discourse_data.json", "w") as f:
-        json.dump(posts, f)
+def login():
+    resp = client.get(LOGIN_URL)
+    soup = BeautifulSoup(resp.text, "html.parser")
+    csrf = soup.find("input", {"name": "authenticity_token"})["value"]
 
-### rag/embed.py
-import json
-import os
-from openai import OpenAI
-from sentence_transformers import SentenceTransformer
-import faiss
-import numpy as np
+    login_data = {
+        "login": USERNAME,
+        "password": PASSWORD,
+        "authenticity_token": csrf
+    }
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-model = SentenceTransformer('all-MiniLM-L6-v2')
+    client.post(LOGIN_URL, data=login_data)
 
-with open("data/discourse_data.json") as f:
-    data = json.load(f)
+def scrape_topics(category_slug, limit=50):
+    login()
+    topic_urls = []
+    r = client.get(f"{BASE_URL}/c/{category_slug}.json")
+    topics = r.json()["topic_list"]["topics"][:limit]
 
-texts = []
-metadatas = []
-for topic in data:
-    for post in topic.get("post_stream", {}).get("posts", []):
-        texts.append(post["cooked"])
-        metadatas.append({"url": f"{DISCOURSE_BASE}/t/{topic['slug']}/{topic['id']}", "text": post["cooked"][:100]})
+    for topic in topics:
+        topic_id = topic["id"]
+        slug = topic["slug"]
+        url = f"{BASE_URL}/t/{slug}/{topic_id}"
+        html = client.get(url).text
+        markdown = html_to_markdown(html)
 
-embeddings = model.encode(texts)
-index = faiss.IndexFlatL2(embeddings.shape[1])
-index.add(np.array(embeddings))
-
-faiss.write_index(index, "data/faiss_index/index.faiss")
-with open("data/faiss_index/meta.json", "w") as f:
-    json.dump(metadatas, f)
+        with open(f"data/markdown/{slug}.md", "w", encoding="utf-8") as f:
+            f.write(markdown)
